@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KoC Goal Path
 // @namespace    https://github.com/birjeldadge/koc-goal-path
-// @version      2.1
+// @version      2.2
 // @description  Shows your current gold goal and XP goal, what each still needs (hits at your average, XP, time), and the path after them. It only reads pages you open yourself. It never loads a page, never clicks, never sends.
 // @match        https://www.kingsofchaos.com/*
 // @match        https://kingsofchaos.com/*
@@ -27,8 +27,9 @@
                       tech, siege, covert) and your strike
    - Upgrades, Safe:  the same levels, so a buy shows up straight away
    - Armory:          what your armory cost in total (for the tech line)
-   - Conquest:        attempts and XP per level, so it can measure what a
-                      conquest really pays you now
+   - Conquest:        tries and XP per level. This page attacks without
+                      reloading, so the panel watches its numbers change and
+                      updates as you go: tries done and what each one paid
    - Attack Log:      your 24 hour average gold per hit (if the KoC
                       Data Centre is installed, its average is used instead so
                       the two boxes always agree)
@@ -236,17 +237,48 @@
     });
     return Object.keys(out).length ? out : null;
   }
-  // Fold a fresh reading into what we remember. When attempts went up since
-  // the last look, the XP gained over those attempts is what a conquest pays NOW.
+  // Fold a fresh reading into what we remember. When tries went up since the
+  // last look, the XP gained over those tries is what a conquest REALLY paid.
+  // We keep the last eight tries or so per level:
+  //   rate    = their average pay        last = the pay of the newest batch
+  //   rateMid = the try number that average sits on (pay falls as tries add up)
   function conquestUpdate(old, read, now) {
     const mem = {};
     Object.keys(read || {}).forEach(function (name) {
       const r = read[name], o = old && old[name];
-      const rec = { times: r.times, exp: r.exp, strength: r.strength, rate: o ? o.rate : null, rateAt: o ? o.rateAt : null };
-      if (o && r.times > o.times && r.exp >= o.exp) { rec.rate = (r.exp - o.exp) / (r.times - o.times); rec.rateAt = now; }
+      const rec = { times: r.times, exp: r.exp, strength: r.strength,
+                    rate: o && o.rate != null ? o.rate : null, rateAt: o && o.rateAt != null ? o.rateAt : null,
+                    rateMid: o && o.rateMid != null ? o.rateMid : null, last: o && o.last != null ? o.last : null,
+                    recent: o && o.recent ? o.recent.slice() : [] };
+      if (o && r.times > o.times && r.exp >= o.exp) {
+        const n = r.times - o.times, per = (r.exp - o.exp) / n;
+        rec.recent.push({ xp: per, n: n, at: r.times });
+        const keep = [];
+        let total = 0;
+        for (let i = rec.recent.length - 1; i >= 0 && total < 8; i--) { keep.unshift(rec.recent[i]); total += rec.recent[i].n; }
+        rec.recent = keep;
+        let sum = 0, cnt = 0, mid = 0;
+        keep.forEach(function (e) { sum += e.xp * e.n; cnt += e.n; mid += (e.at - (e.n - 1) / 2) * e.n; });
+        rec.rate = sum / cnt; rec.rateMid = mid / cnt; rec.rateAt = now; rec.last = per;
+      }
       mem[name] = rec;
     });
     return mem;
+  }
+  // If the page does not redraw its statistics table after an attack, work the
+  // try out from the left box instead: turns went down by 10 a try and XP went
+  // up by what the tries paid. `level` is the conquest picked in the page's list.
+  function conquestFromWallet(cq, before, after, level, now) {
+    if (!cq || !before || !after || !level || !cq[level]) return null;
+    const spent = before.turns - after.turns;
+    const gained = (after.xp + after.bank) - (before.xp + before.bank);
+    // a queue is five tries at most; anything bigger, or paying over 60 a try, is not a conquest
+    if (!(spent > 0) || spent % CONQUEST_TURNS !== 0 || spent > 100 || !(gained > 0) || gained / (spent / CONQUEST_TURNS) > 60) return null;
+    const read = {};
+    Object.keys(cq).forEach(function (k) { read[k] = { times: cq[k].times, exp: cq[k].exp, strength: cq[k].strength }; });
+    read[level].times += spent / CONQUEST_TURNS;
+    read[level].exp += gained;
+    return conquestUpdate(cq, read, now);
   }
   // What a conquest pays (Era 24, fitted to one member's own conquest table):
   //   a WIN pays 50 XP for the first 50 tries on a level, then half an XP less
@@ -263,16 +295,20 @@
   function conquestPay(attempt, chance) { return winPay(attempt) * (0.8 + 0.2 * chance); }
   // Every open level, best first: what the NEXT try is expected to pay, and how
   // many tries are left before it stops beating the price of its own turns.
+  // Where we have watched real tries, the estimate starts from what they paid
+  // and only uses the rule for how much the pay has fallen since.
   function conquestBoard(cq, strike) {
     const rows = [];
     Object.keys(cq || {}).forEach(function (name) {
       const c = cq[name];
       const chance = winChance(strike, c.strength);
-      const xp = conquestPay(c.times + 1, chance);
+      const shift = c.rate != null ? c.rate - conquestPay(c.rateMid != null ? c.rateMid : c.times, chance) : 0;
+      const pay = function (attempt) { return Math.max(0, conquestPay(attempt, chance) + shift); };
+      const xp = pay(c.times + 1);
       let left = 0;
-      while (left < 400 && conquestPay(c.times + 1 + left, chance) > TRADE_BREAK_EVEN) left++;
+      while (left < 400 && pay(c.times + 1 + left) > TRADE_BREAK_EVEN) left++;
       rows.push({ name: name, xp: xp, perTurn: xp / CONQUEST_TURNS, chance: chance, times: c.times, left: left,
-                  measured: c.rate != null ? c.rate : null, pays: xp > TRADE_BREAK_EVEN });
+                  measured: c.rate != null ? c.rate : null, last: c.last != null ? c.last : null, pays: xp > TRADE_BREAK_EVEN });
     });
     rows.sort(function (a, b) { return b.xp - a.xp; });
     return rows;
@@ -564,7 +600,8 @@
     fewestTrades: fewestTrades, buildPath: buildPath, current: current, upcoming: upcoming, goldPlan: goldPlan,
     xpPlan: xpPlan, upgradeVsHit: upgradeVsHit, vaultTaxIn: vaultTaxIn, parseArmory: parseArmory, xpValues: xpValues, forecast: forecast, parseConquest: parseConquest,
     conquestUpdate: conquestUpdate, conquestBoard: conquestBoard, conquestXp: conquestXp, PRESETS: PRESETS,
-    winPay: winPay, winChance: winChance, conquestPay: conquestPay, conquestDay: conquestDay };
+    winPay: winPay, winChance: winChance, conquestPay: conquestPay, conquestDay: conquestDay,
+    conquestFromWallet: conquestFromWallet };
   if (typeof module !== "undefined" && module.exports) { module.exports = GP; }
   if (typeof document === "undefined") return;
 
@@ -721,7 +758,9 @@
     "#kgp .kgp-seg3 button{font:inherit;font-weight:700;padding:3px 10px;border:0;background:#18202f;color:#c6cedb;cursor:pointer}",
     "#kgp .kgp-seg3 button+button{border-left:1px solid #56627a}",
     "#kgp .kgp-seg3 button.kgp-on{background:#ffcf5c;color:#10131a}",
-    "#kgp .kgp-vrow .kgp-vl i{font-style:normal;color:#8590a3;margin-left:4px;font-size:11.5px}",
+    "#kgp .kgp-vrow .kgp-vl i{font-style:normal;color:#8590a3;margin-left:5px;font-size:11.5px}",
+    "#kgp .kgp-vrow.kgp-crow{grid-template-columns:138px 1fr 56px}",
+    "#kgp .kgp-live{color:#7ff0a8}",
     "#kgp .kgp-next{display:flex;flex-direction:column;gap:5px;font-size:12px}",
     "#kgp .kgp-nrow{display:flex;flex-wrap:wrap;align-items:center;gap:4px}",
     "#kgp .kgp-nl{flex:0 0 auto;width:40px;font-weight:800;font-size:10.5px;letter-spacing:.08em}",
@@ -956,22 +995,22 @@
     const rows = conquestBoard(cq, strike);
     let left = 0;
     rows.forEach(function (r) { left += r.left; });
-    rows.slice(0, 5).forEach(function (r, i) {
-      const row = el("div", "kgp-vrow" + (i === 0 && r.pays ? " kgp-best" : "") + (r.pays ? "" : " kgp-dim"));
-      row.title = r.times + " tries so far. Win chance about " + Math.round(r.chance * 100) + "%. " + r.left + " more tries beat the price of their turns." +
-                  (r.measured != null ? " Last measured: " + trim(r.measured, 1) + " XP a try." : "");
+    rows.slice(0, 6).forEach(function (r, i) {
+      const row = el("div", "kgp-vrow kgp-crow" + (i === 0 && r.pays ? " kgp-best" : "") + (r.pays ? "" : " kgp-dim"));
+      row.title = r.times + " done. Win chance about " + Math.round(r.chance * 100) + "%. " + r.left + " more tries beat the price of their turns." +
+                  (r.last != null ? " Your last one paid " + trim(r.last, 1) + " XP; your recent tries averaged " + trim(r.measured, 1) + "." : " Estimate from the pay rule; it sharpens once you do one with this page open.");
       const l = el("span", "kgp-vl", r.name);
-      l.appendChild(el("i", null, Math.round(r.chance * 100) + "%"));
+      l.appendChild(el("i", r.last != null ? "kgp-live" : null, r.times + " kc"));
       row.appendChild(l);
       const b = el("div", "kgp-vbar"), f = el("div", "kgp-vfill");
-      f.style.width = Math.max(2, Math.round(r.xp / 50 * 100)) + "%";
+      f.style.width = Math.max(2, Math.min(100, Math.round(r.xp / 50 * 100))) + "%";
       b.appendChild(f);
       row.appendChild(b);
-      row.appendChild(el("span", "kgp-vv", trim(r.xp, 1) + " XP"));
+      row.appendChild(el("span", "kgp-vv", Math.round(r.xp) + " XP"));
       box.appendChild(row);
     });
     box.appendChild(el("div", "kgp-note", left > 0
-      ? left + " tries left that pay over 28.5 XP, the point where a conquest stops beating the XP price of its own turns. The % is your win chance."
+      ? left + " tries left that pay over 28.5 XP, where a conquest stops beating the XP price of its turns. kc = tries done; green kc = pay watched live."
       : "No level pays over 28.5 XP any more. Conquests no longer beat the XP price of their turns."));
     body.appendChild(box);
   }
@@ -1240,6 +1279,64 @@
   const LOADED = Date.now();
   let TAX_TIMER = null;
 
+  // Which conquest is picked in the page's own list.
+  function selectedConquest() {
+    const sel = document.querySelector("#anotherconquest select, #conquests select");
+    const opt = sel && sel.options ? sel.options[sel.selectedIndex] : null;
+    const text = opt ? (opt.textContent || "").trim() : "";
+    for (let i = CONQUESTS.length - 1; i >= 0; i--) if (text.indexOf(CONQUESTS[i]) === 0) return CONQUESTS[i];
+    return null;
+  }
+  // The Conquest page runs each attack without loading a new page. Watch the
+  // page's own numbers change (we only look, we never ask the game anything)
+  // and redraw: tries done, XP paid, turns and XP left.
+  function watchConquest(mem, seen) {
+    if (!/\/conquestv2\.php$/.test(location.pathname.toLowerCase()) || typeof MutationObserver === "undefined") return;
+    let timer = null, pending = null;
+    const sig = function (c) { return c ? Object.keys(c).map(function (k) { return k + c[k].times + ":" + c[k].exp; }).join(",") : ""; };
+    let tableSig = sig(parseConquest(document.body.innerText || ""));   // what the page's table said when we last looked
+    const check = function () {
+      timer = null;
+      try {
+        const now = Date.now();
+        const wallet = parseSidebar(sidebarText());
+        const read = parseConquest(document.body.innerText || "");
+        let changed = false;
+        if (read && sig(read) !== tableSig) {                          // the page's own table moved: trust it
+          tableSig = sig(read);
+          Object.keys(read).forEach(function (k) {                     // but never step back behind tries we already counted
+            const have = mem.cq && mem.cq[k];
+            if (have && read[k].times < have.times) read[k] = { times: have.times, exp: have.exp, strength: read[k].strength };
+          });
+          mem.cq = conquestUpdate(mem.cq, read, now); mem.cqAt = now;
+          mem.cqTableLive = true;
+          pending = null; changed = true;
+        } else if (pending && now - pending.at >= 800) {               // it did not: use turns spent and XP gained
+          const live = conquestFromWallet(mem.cq, pending.before, pending.after, pending.level, now);
+          if (live) { mem.cq = live; mem.cqAt = now; changed = true; }
+          pending = null;
+        }
+        if (wallet && JSON.stringify(wallet) !== JSON.stringify(seen.wallet)) {
+          if (pending) pending.after = wallet;
+          else if (!mem.cqTableLive && seen.wallet && wallet.turns < seen.wallet.turns) {
+            pending = { before: seen.wallet, after: wallet, level: selectedConquest(), at: now };
+            setTimeout(check, 900);
+          }
+          seen.wallet = wallet; changed = true;
+        }
+        if (changed) { save(mem); draw(mem, seen); }
+      } catch (e) { /* keep the panel as it is */ }
+    };
+    new MutationObserver(function (list) {
+      for (let i = 0; i < list.length; i++) {
+        const t = list[i].target, e = t && t.nodeType === 1 ? t : (t ? t.parentElement : null);
+        if (e && e.closest && e.closest("#kgp")) continue;             // our own redraws
+        if (!timer) timer = setTimeout(check, 400);
+        return;
+      }
+    }).observe(document.body, { childList: true, subtree: true, characterData: true });
+  }
+
   // ================================= run ===================================
   try {
     const mem = load();
@@ -1259,6 +1356,7 @@
     };
     setTimeout(lookAgain, 1500);
     setTimeout(lookAgain, 6000);
+    watchConquest(mem, seen);
   } catch (e) {
     if (window.console) console.error("[KoC Goal Path]", e);
   }
