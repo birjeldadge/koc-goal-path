@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KoC Goal Path
 // @namespace    https://github.com/birjeldadge/koc-goal-path
-// @version      2.2
+// @version      2.4
 // @description  Shows your current gold goal and XP goal, what each still needs (hits at your average, XP, time), and the path after them. It only reads pages you open yourself. It never loads a page, never clicks, never sends.
 // @match        https://www.kingsofchaos.com/*
 // @match        https://kingsofchaos.com/*
@@ -281,10 +281,17 @@
     return conquestUpdate(cq, read, now);
   }
   // What a conquest pays (Era 24, fitted to one member's own conquest table):
-  //   a WIN pays 50 XP for the first 50 tries on a level, then half an XP less
-  //   per try (that predicts 4,259.5 XP for 96 tries; the game showed 4,259);
+  //   a WIN pays 50 XP for the first 50 tries on a level. From try 51 to 80 it
+  //   falls about 0.54 XP a try (49, 48, 47 ... down to about 34), and after
+  //   try 80 it falls more slowly, about 0.25 XP a try.
+  //   Checked against five readings, all within 0.1%: 80 tries = 3,751 XP,
+  //   84 = 3,885, 95 = 4,229, 96 = 4,259, and tries 71 to 111 on one level = 1,288.
   //   a FAIL pays 40, taken here as four fifths of the win pay all the way down.
-  function winPay(attempt) { return attempt <= 50 ? 50 : Math.max(0, 50 - (attempt - 50) / 2); }
+  function winPay(attempt) {
+    if (attempt <= 50) return 50;
+    if (attempt <= 80) return 50 - 0.54 * (attempt - 50);
+    return Math.max(0, 33.8 - 0.25 * (attempt - 80));
+  }
   // Chance of a win from your strike against the opponent's strength. The game
   // recommends 2.2x the strength for a sure win; at about 1.0x one member won roughly
   // one in three. A straight line through those two points. An estimate.
@@ -979,7 +986,7 @@
     body.appendChild(box);
   }
 
-  // What a conquest pays you on each open level right now. Longest bar = do this one.
+  // What a conquest pays you on each open level right now, listed like the game's own table.
   function drawConquest(body, cq, strike) {
     const box = el("div", "kgp-board");
     box.appendChild(el("div", "kgp-bt", "Conquest: XP for the next try (10 turns)"));
@@ -992,11 +999,13 @@
       body.appendChild(box);
       return;
     }
-    const rows = conquestBoard(cq, strike);
+    const ranked = conquestBoard(cq, strike);
+    const best = ranked.length && ranked[0].pays ? ranked[0].name : null;
+    const rows = ranked.slice().sort(function (a, b) { return CONQUESTS.indexOf(a.name) - CONQUESTS.indexOf(b.name); });
     let left = 0;
     rows.forEach(function (r) { left += r.left; });
-    rows.slice(0, 6).forEach(function (r, i) {
-      const row = el("div", "kgp-vrow kgp-crow" + (i === 0 && r.pays ? " kgp-best" : "") + (r.pays ? "" : " kgp-dim"));
+    rows.forEach(function (r) {
+      const row = el("div", "kgp-vrow kgp-crow" + (r.name === best ? " kgp-best" : "") + (r.pays ? "" : " kgp-dim"));
       row.title = r.times + " done. Win chance about " + Math.round(r.chance * 100) + "%. " + r.left + " more tries beat the price of their turns." +
                   (r.last != null ? " Your last one paid " + trim(r.last, 1) + " XP; your recent tries averaged " + trim(r.measured, 1) + "." : " Estimate from the pay rule; it sharpens once you do one with this page open.");
       const l = el("span", "kgp-vl", r.name);
@@ -1010,7 +1019,7 @@
       box.appendChild(row);
     });
     box.appendChild(el("div", "kgp-note", left > 0
-      ? left + " tries left that pay over 28.5 XP, where a conquest stops beating the XP price of its turns. kc = tries done; green kc = pay watched live."
+      ? "Same order as the game's table. Green row = best pay now. " + left + " tries left over 28.5 XP, where a conquest stops beating the XP price of its turns. Green kc = watched live."
       : "No level pays over 28.5 XP any more. Conquests no longer beat the XP price of their turns."));
     body.appendChild(box);
   }
@@ -1150,7 +1159,7 @@
       const l = el("span", null, "Vault tax 5% in ");
       l.appendChild(el("b", null, span(left)));
       taxBox.appendChild(l);
-      taxBox.appendChild(el("span", null, "at " + clock(new Date(Math.round((Date.now() + left * 60000) / 60000) * 60000)) + (wallet.vault > 0 ? ", costs " + fmt(wallet.vault * 0.05) : "")));
+      taxBox.appendChild(el("span", null, "at " + clock(new Date(Math.round((Date.now() + left * 60000) / 300000) * 300000)) + (wallet.vault > 0 ? ", costs " + fmt(wallet.vault * 0.05) : "")));
     };
     paintTax();
     if (TAX_TIMER) clearInterval(TAX_TIMER);
