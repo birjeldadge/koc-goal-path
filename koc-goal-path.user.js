@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KoC Goal Path
 // @namespace    https://github.com/birjeldadge/koc-goal-path
-// @version      2.5
+// @version      2.6
 // @description  Shows your current gold goal and XP goal, what each still needs (hits at your average, XP, time), and the path after them. It only reads pages you open yourself. It never loads a page, never clicks, never sends.
 // @match        https://www.kingsofchaos.com/*
 // @match        https://kingsofchaos.com/*
@@ -22,7 +22,9 @@
    numbers that are already on the page you opened:
 
    - every page:      the left box (Gold, Safe, Vault, Experience, Turns),
-                      the era day and the server clock
+                      the era day and the server clock. If the left box
+                      changes while the page stays open (income arriving, an
+                      attack that does not reload), the panel follows it
    - Command Center:  your levels (XP a minute, soldiers a minute, economy,
                       tech, siege, covert) and your strike
    - Upgrades, Safe:  the same levels, so a buy shows up straight away
@@ -661,11 +663,18 @@
   }
 
   // ============================ read this page ==============================
+  let SIDE = null;         // the left box's table, once found
+  function isSidebar(s) { return s.indexOf("Gold:") !== -1 && s.indexOf("Experience:") !== -1 && s.indexOf("Turns:") !== -1; }
   function sidebarText() {
+    if (SIDE && SIDE.isConnected) {
+      const s0 = SIDE.innerText || "";
+      if (isSidebar(s0)) return s0;
+    }
     let pick = null;
+    SIDE = null;
     document.querySelectorAll("table").forEach(function (t) {
       const s = t.innerText || "";
-      if (s.indexOf("Gold:") !== -1 && s.indexOf("Experience:") !== -1 && s.indexOf("Turns:") !== -1) pick = s;   // last = innermost
+      if (isSidebar(s)) { pick = s; SIDE = t; }   // last = innermost
     });
     return pick;
   }
@@ -1320,38 +1329,47 @@
     for (let i = CONQUESTS.length - 1; i >= 0; i--) if (text.indexOf(CONQUESTS[i]) === 0) return CONQUESTS[i];
     return null;
   }
-  // The Conquest page runs each attack without loading a new page. Watch the
-  // page's own numbers change (we only look, we never ask the game anything)
-  // and redraw: tries done, XP paid, turns and XP left.
-  function watchConquest(mem, seen) {
-    if (!/\/conquestv2\.php$/.test(location.pathname.toLowerCase()) || typeof MutationObserver === "undefined") return;
+  // Watch the page's own numbers change (we only look, we never ask the game
+  // anything) and redraw. On every page: the left box, so the goals follow
+  // your gold, XP and turns without a reload. On the Conquest page, which runs
+  // each attack without loading a new page: also tries done and XP paid.
+  function watchPage(mem, seen) {
+    if (typeof MutationObserver === "undefined") return;
+    const onConquest = /\/conquestv2\.php$/.test(location.pathname.toLowerCase());
     let timer = null, pending = null;
     const sig = function (c) { return c ? Object.keys(c).map(function (k) { return k + c[k].times + ":" + c[k].exp; }).join(",") : ""; };
-    let tableSig = sig(parseConquest(document.body.innerText || ""));   // what the page's table said when we last looked
+    let tableSig = onConquest ? sig(parseConquest(document.body.innerText || "")) : "";   // what the page's table said when we last looked
+    const typing = function () {                                       // do not redraw under your cursor
+      const a = document.activeElement;
+      return !!(a && a.tagName === "INPUT" && a.type !== "checkbox" && a.closest && a.closest("#kgp"));
+    };
     const check = function () {
       timer = null;
       try {
+        if (typing()) { timer = setTimeout(check, 1500); return; }
         const now = Date.now();
         const wallet = parseSidebar(sidebarText());
-        const read = parseConquest(document.body.innerText || "");
         let changed = false;
-        if (read && sig(read) !== tableSig) {                          // the page's own table moved: trust it
-          tableSig = sig(read);
-          Object.keys(read).forEach(function (k) {                     // but never step back behind tries we already counted
-            const have = mem.cq && mem.cq[k];
-            if (have && read[k].times < have.times) read[k] = { times: have.times, exp: have.exp, strength: read[k].strength };
-          });
-          mem.cq = conquestUpdate(mem.cq, read, now); mem.cqAt = now;
-          mem.cqTableLive = true;
-          pending = null; changed = true;
-        } else if (pending && now - pending.at >= 800) {               // it did not: use turns spent and XP gained
-          const live = conquestFromWallet(mem.cq, pending.before, pending.after, pending.level, now);
-          if (live) { mem.cq = live; mem.cqAt = now; changed = true; }
-          pending = null;
+        if (onConquest) {
+          const read = parseConquest(document.body.innerText || "");
+          if (read && sig(read) !== tableSig) {                        // the page's own table moved: trust it
+            tableSig = sig(read);
+            Object.keys(read).forEach(function (k) {                   // but never step back behind tries we already counted
+              const have = mem.cq && mem.cq[k];
+              if (have && read[k].times < have.times) read[k] = { times: have.times, exp: have.exp, strength: read[k].strength };
+            });
+            mem.cq = conquestUpdate(mem.cq, read, now); mem.cqAt = now;
+            mem.cqTableLive = true;
+            pending = null; changed = true;
+          } else if (pending && now - pending.at >= 800) {             // it did not: use turns spent and XP gained
+            const live = conquestFromWallet(mem.cq, pending.before, pending.after, pending.level, now);
+            if (live) { mem.cq = live; mem.cqAt = now; changed = true; }
+            pending = null;
+          }
         }
         if (wallet && JSON.stringify(wallet) !== JSON.stringify(seen.wallet)) {
           if (pending) pending.after = wallet;
-          else if (!mem.cqTableLive && seen.wallet && wallet.turns < seen.wallet.turns) {
+          else if (onConquest && !mem.cqTableLive && seen.wallet && wallet.turns < seen.wallet.turns) {
             pending = { before: seen.wallet, after: wallet, level: selectedConquest(), at: now };
             setTimeout(check, 900);
           }
@@ -1364,7 +1382,7 @@
       for (let i = 0; i < list.length; i++) {
         const t = list[i].target, e = t && t.nodeType === 1 ? t : (t ? t.parentElement : null);
         if (e && e.closest && e.closest("#kgp")) continue;             // our own redraws
-        if (!timer) timer = setTimeout(check, 400);
+        if (!timer) timer = setTimeout(check, onConquest ? 400 : 1000);
         return;
       }
     }).observe(document.body, { childList: true, subtree: true, characterData: true });
@@ -1391,7 +1409,7 @@
     };
     setTimeout(lookAgain, 1500);
     setTimeout(lookAgain, 6000);
-    watchConquest(mem, seen);
+    watchPage(mem, seen);
   } catch (e) {
     if (window.console) console.error("[KoC Goal Path]", e);
   }
