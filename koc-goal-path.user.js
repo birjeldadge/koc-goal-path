@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KoC Goal Path
 // @namespace    https://github.com/birjeldadge/koc-goal-path
-// @version      2.4
+// @version      2.5
 // @description  Shows your current gold goal and XP goal, what each still needs (hits at your average, XP, time), and the path after them. It only reads pages you open yourself. It never loads a page, never clicks, never sends.
 // @match        https://www.kingsofchaos.com/*
 // @match        https://kingsofchaos.com/*
@@ -34,8 +34,8 @@
                       Data Centre is installed, its average is used instead so
                       the two boxes always agree)
 
-   It also shows a Vault tax clock (5% at 00:00, 06:00, 12:00 and 18:00 server
-   time) and, for every goal, the date you reach it at the hits-a-day you set.
+   It also shows a Vault tax clock, counted to the second off the server's own
+   clock (5% at 00:00, 06:00, 12:00 and 18:00 server time) and, for every goal, the date you reach it at the hits-a-day you set.
 
    From those it shows two goals at once, because they are paid from two
    different pots: one bought with GOLD (Vault + Safe + gold on hand) and one
@@ -172,7 +172,7 @@
     const t = String(text || "");
     const d = t.match(/day\s+(\d+)\s+of\s+(\d+)/i);
     const c = t.match(/Server Time\s*(\d{4})-(\d\d)-(\d\d)\s+(\d\d):(\d\d):(\d\d)/);
-    return { day: d ? +d[1] : null, days: d ? +d[2] : null, hour: c ? +c[4] : null, minute: c ? +c[5] : null };
+    return { day: d ? +d[1] : null, days: d ? +d[2] : null, hour: c ? +c[4] : null, minute: c ? +c[5] : null, second: c ? +c[6] : null };
   }
   function parseBase(text) {
     const t = String(text || "");
@@ -507,6 +507,21 @@
     return { ratio: perXp / hit, breakEven: perXp * 222, next: next };
   }
 
+  // Seconds until the next Vault tax, from the server's own clock.
+  function vaultTaxSeconds(hour, minute, second) {
+    if (hour == null || minute == null) return null;
+    return 21600 - ((hour % 6) * 3600 + minute * 60 + (second || 0));
+  }
+  // 9912 -> "2h 45m 12s", 312 -> "5m 12s", 9 -> "9s"
+  function spanSec(seconds) {
+    if (seconds == null || !isFinite(seconds)) return "?";
+    const t = Math.max(0, Math.floor(seconds));
+    const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), sec = t % 60;
+    const two = function (n) { return (n < 10 ? "0" : "") + n; };
+    if (h > 0) return h + "h " + two(m) + "m " + two(sec) + "s";
+    if (m > 0) return m + "m " + two(sec) + "s";
+    return sec + "s";
+  }
   // Minutes until the next Vault tax (00:00, 06:00, 12:00, 18:00 server time).
   function vaultTaxIn(hour, minute) {
     if (hour == null || minute == null) return null;
@@ -605,7 +620,7 @@
     econLevelFromGold: econLevelFromGold, parseSidebar: parseSidebar, parseEra: parseEra, parseBase: parseBase,
     parseUpgrades: parseUpgrades, parseSafe: parseSafe, parseAttackLog: parseAttackLog, hitsWithTrades: hitsWithTrades,
     fewestTrades: fewestTrades, buildPath: buildPath, current: current, upcoming: upcoming, goldPlan: goldPlan,
-    xpPlan: xpPlan, upgradeVsHit: upgradeVsHit, vaultTaxIn: vaultTaxIn, parseArmory: parseArmory, xpValues: xpValues, forecast: forecast, parseConquest: parseConquest,
+    xpPlan: xpPlan, upgradeVsHit: upgradeVsHit, vaultTaxIn: vaultTaxIn, parseArmory: parseArmory, xpValues: xpValues, forecast: forecast, vaultTaxSeconds: vaultTaxSeconds, spanSec: spanSec, parseConquest: parseConquest,
     conquestUpdate: conquestUpdate, conquestBoard: conquestBoard, conquestXp: conquestXp, PRESETS: PRESETS,
     winPay: winPay, winChance: winChance, conquestPay: conquestPay, conquestDay: conquestDay,
     conquestFromWallet: conquestFromWallet };
@@ -750,8 +765,8 @@
     "#kgp .kgp-best .kgp-vfill{background:linear-gradient(90deg,#1f9d55,#4ade80)} #kgp .kgp-best .kgp-vl,#kgp .kgp-best .kgp-vv{color:#7ff0a8}",
     "#kgp .kgp-dim .kgp-vl,#kgp .kgp-dim .kgp-vv{color:#8590a3}",
     "#kgp .kgp-note{font-size:12px;color:#c6cedb}",
-    "#kgp .kgp-tax{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12.5px;padding:5px 9px;border-radius:6px;background:#18202f;border:1px solid #33405a;font-variant-numeric:tabular-nums}",
-    "#kgp .kgp-tax b{font-weight:800;color:#eef0f4} #kgp .kgp-tax span{color:#aab4c4}",
+    "#kgp .kgp-tax{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:0 8px;font-size:12.5px;padding:5px 9px;border-radius:6px;background:#18202f;border:1px solid #33405a;font-variant-numeric:tabular-nums}",
+    "#kgp .kgp-tax b{font-weight:800;color:#eef0f4;font-variant-numeric:tabular-nums} #kgp .kgp-tax span{color:#aab4c4;white-space:nowrap}",
     "#kgp .kgp-tax.kgp-taxhot{background:#3a1d0d;border-color:#d9772b} #kgp .kgp-tax.kgp-taxhot b{color:#ffb454}",
     "#kgp .kgp-pace{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;border-top:1px dashed #33405a;padding-top:6px}",
     "#kgp .kgp-pace span:first-child{color:#aab4c4} #kgp .kgp-pace b{font-weight:800;text-align:right}",
@@ -1145,25 +1160,23 @@
 
     // ---- Vault tax clock: 5% every six hours at 00, 06, 12, 18 server time (20% a day) ----
     const taxBox = el("div", "kgp-tax");
-    const taxAt = function () {
-      const srv = era.hour != null ? { h: era.hour, m: era.minute } : { h: new Date().getUTCHours(), m: new Date().getUTCMinutes() };
-      const gone = era.hour != null ? Math.floor((Date.now() - LOADED) / 60000) : 0;
-      let left = vaultTaxIn(srv.h, srv.m) - gone;
-      while (left <= 0) left += 360;
-      return left;
-    };
+    const taxLeft = el("b"), taxWhen = el("span");
+    const taxLabel = el("span", null, "Vault tax in ");
+    taxLabel.appendChild(taxLeft);
+    taxBox.appendChild(taxLabel);
+    taxBox.appendChild(taxWhen);
     const paintTax = function () {
-      const left = taxAt();
-      taxBox.textContent = "";
-      taxBox.className = "kgp-tax" + (wallet.vault > 0 && left <= 45 ? " kgp-taxhot" : "");
-      const l = el("span", null, "Vault tax 5% in ");
-      l.appendChild(el("b", null, span(left)));
-      taxBox.appendChild(l);
-      taxBox.appendChild(el("span", null, "at " + clock(new Date(Math.round((Date.now() + left * 60000) / 300000) * 300000)) + (wallet.vault > 0 ? ", costs " + fmt(wallet.vault * 0.05) : "")));
+      const now = Date.now();
+      while (TAX_AT != null && TAX_AT <= now) TAX_AT += 21600000;      // passed one: the next is six hours on
+      if (TAX_AT == null) { taxLeft.textContent = "?"; return; }
+      const left = Math.ceil((TAX_AT - now) / 1000);
+      taxLeft.textContent = spanSec(left);
+      taxWhen.textContent = "at " + clock(new Date(Math.round(TAX_AT / 60000) * 60000)) + (wallet.vault > 0 ? ", costs " + fmt(wallet.vault * 0.05) : ", takes 5%");
+      taxBox.className = "kgp-tax" + (wallet.vault > 0 && left <= 2700 ? " kgp-taxhot" : "");
     };
     paintTax();
     if (TAX_TIMER) clearInterval(TAX_TIMER);
-    TAX_TIMER = setInterval(paintTax, 30000);
+    TAX_TIMER = setInterval(paintTax, 1000);
     body.appendChild(taxBox);
 
     if (g) drawGold(body, g, wallet, era, avg, countOnHand, eta, paceTip);
@@ -1287,6 +1300,17 @@
 
   const LOADED = Date.now();
   let TAX_TIMER = null;
+  let TAX_AT = null;       // the moment of the next Vault tax, on this PC's clock
+
+  // Line the tax clock up with the SERVER's clock. The page prints "Server Time
+  // hh:mm:ss"; the tax lands when that clock reaches 00:00, 06:00, 12:00 or 18:00.
+  // `readAt` is when we read the page. If the page shows no server clock, fall
+  // back to this PC's own UTC clock (the server runs on UTC).
+  function syncTax(era, readAt) {
+    let left = vaultTaxSeconds(era.hour, era.minute, era.second);
+    if (left == null) { const d = new Date(readAt); left = vaultTaxSeconds(d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds()); }
+    TAX_AT = readAt + left * 1000;
+  }
 
   // Which conquest is picked in the page's own list.
   function selectedConquest() {
@@ -1350,12 +1374,14 @@
   try {
     const mem = load();
     const seen = readPage(mem);
+    syncTax(seen.era, Date.now());
     save(mem);
     draw(mem, seen);
     const lookAgain = function () {          // things the page (or the Data Centre) draws after load
       try {
         let changed = readBanked(mem);
         const era = parseEra(document.body ? document.body.innerText || "" : "");
+        if (era.hour != null) syncTax(era, Date.now());
         if (era.day != null && (!mem.era || mem.era.day !== era.day || seen.era.day !== era.day)) {
           seen.era = eraNow(mem, era, Date.now());
           changed = true;
