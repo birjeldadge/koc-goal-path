@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KoC Goal Path
 // @namespace    https://github.com/birjeldadge/koc-goal-path
-// @version      2.6
+// @version      2.7
 // @description  Shows your current gold goal and XP goal, what each still needs (hits at your average, XP, time), and the path after them. It only reads pages you open yourself. It never loads a page, never clicks, never sends.
 // @match        https://www.kingsofchaos.com/*
 // @match        https://kingsofchaos.com/*
@@ -122,6 +122,20 @@
     return m ? parseFloat(m[0]) : null;
   }
 
+  // The left box is narrow, so the game may shorten or wrap a big number.
+  // All of these read as 1.3 billion: "1,305,517,809", "1,305 M", "1,305.5M",
+  // "1.31 B", "1.31 Billion", and "1,305," wrapped onto a second line "517,809".
+  // AMOUNT is the pattern (as text) for one such number; amount() reads it.
+  const AMOUNT = "(\\d+(?:,\\s*\\d+)*(?:\\.\\d+)?)(?:[ \\t\\u00a0]*(trillion|tril|billion|bil|million|mil|thousand|k|m|b|t)(?![a-z]))?";
+  const UNIT = { k: 1e3, t: 1e12, m: 1e6, b: 1e9 };
+  function amount(digits, unit) {
+    const n = parseFloat(String(digits).replace(/[,\s]/g, ""));
+    if (!isFinite(n)) return null;
+    const u = unit ? String(unit).toLowerCase() : "";
+    const mult = !u ? 1 : (u.indexOf("th") === 0 ? 1e3 : u.indexOf("tr") === 0 ? 1e12 : UNIT[u.charAt(0)]);
+    return Math.round(n * mult);
+  }
+
   // 983400000 -> "983M", 1638400000 -> "1.64B", 450000 -> "450K", 675 -> "675"
   function fmt(n) {
     if (n == null || !isFinite(n)) return "?";
@@ -162,13 +176,16 @@
   // ---- page readers: each takes the page's visible text ----
   function parseSidebar(text) {
     const t = String(text || "");
-    const grab = function (re) { const m = t.match(re); return m && m[1] !== "" ? num(m[1]) : null; };
-    const gold = grab(/Gold:\s*([\d,]+)/);
-    const xp = grab(/Experience:\s*([\d,]+)/);
-    const turns = grab(/Turns:\s*([\d,]+)/);
+    const grab = function (label) {
+      const m = t.match(new RegExp(label + ":\\s*" + AMOUNT, "i"));
+      return m ? amount(m[1], m[2]) : null;
+    };
+    const gold = grab("Gold");
+    const xp = grab("Experience");
+    const turns = grab("Turns");
     if (gold == null || xp == null || turns == null) return null;
-    return { gold: gold, safe: grab(/Safe:\s*([\d,]+)/) || 0, vault: grab(/Vault:\s*([\d,]+)/) || 0,
-             xp: xp, bank: grab(/Experience Bank:\s*([\d,]+)/) || 0, turns: turns };
+    return { gold: gold, safe: grab("Safe") || 0, vault: grab("Vault") || 0,
+             xp: xp, bank: grab("Experience Bank") || 0, turns: turns };
   }
   function parseEra(text) {
     const t = String(text || "");
@@ -622,7 +639,7 @@
     econLevelFromGold: econLevelFromGold, parseSidebar: parseSidebar, parseEra: parseEra, parseBase: parseBase,
     parseUpgrades: parseUpgrades, parseSafe: parseSafe, parseAttackLog: parseAttackLog, hitsWithTrades: hitsWithTrades,
     fewestTrades: fewestTrades, buildPath: buildPath, current: current, upcoming: upcoming, goldPlan: goldPlan,
-    xpPlan: xpPlan, upgradeVsHit: upgradeVsHit, vaultTaxIn: vaultTaxIn, parseArmory: parseArmory, xpValues: xpValues, forecast: forecast, vaultTaxSeconds: vaultTaxSeconds, spanSec: spanSec, parseConquest: parseConquest,
+    xpPlan: xpPlan, upgradeVsHit: upgradeVsHit, vaultTaxIn: vaultTaxIn, parseArmory: parseArmory, amount: amount, xpValues: xpValues, forecast: forecast, vaultTaxSeconds: vaultTaxSeconds, spanSec: spanSec, parseConquest: parseConquest,
     conquestUpdate: conquestUpdate, conquestBoard: conquestBoard, conquestXp: conquestXp, PRESETS: PRESETS,
     winPay: winPay, winChance: winChance, conquestPay: conquestPay, conquestDay: conquestDay,
     conquestFromWallet: conquestFromWallet };
